@@ -2,12 +2,12 @@
 #SBATCH --job-name=janusvln-train
 #SBATCH --output=logs/janusvln_train_%j.log
 #SBATCH --error=logs/janusvln_train_%j.err
-#SBATCH --nodelist=worker-2
+#SBATCH --nodelist=worker-0
 #SBATCH --gpus=8
 #SBATCH --cpus-per-task=120
 #SBATCH --mem-per-cpu=8192
 #
-#SBATCH --container-image=/mnt/data/vmo-ai-task/dungpq6/ubuntu22-cuda128-conda-janusvln.sqsh
+#SBATCH --container-image=/mnt/data/vmo-ai-task/dungpq6/ubuntu22-cuda128-conda-janusvln-spatialstack.sqsh
 #SBATCH --container-mounts=/mnt/data/:/mnt/data/,/home/dungpq6/Project:/home/dungpq6/Project
 
 set -euo pipefail
