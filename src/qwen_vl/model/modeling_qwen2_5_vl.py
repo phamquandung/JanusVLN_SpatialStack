@@ -1389,6 +1389,42 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    @staticmethod
+    def _tile_geometry_features_for_vision_tokens(
+        geo_feats,
+        n_vision_tokens: int,
+        spatial_merge_size: int,
+        include_camera_token: bool = False,
+    ):
+        """Repeat per-frame VGGT geometry to match total LM image-token count.
+
+        JanusVLN may place multiple image placeholders in one sequence (history
+        frames) while VGGT geometry is extracted from a single representative frame.
+        The legacy lam_add path tiles 3D embeddings the same way before fusion.
+        """
+        m2 = spatial_merge_size * spatial_merge_size
+
+        def tile_tensor(t: torch.Tensor) -> torch.Tensor:
+            batch_size, seq_len, _ = t.shape
+            if include_camera_token and seq_len % m2 == 1:
+                n_per_frame = (seq_len - 1) // m2
+            else:
+                n_per_frame = seq_len // m2
+
+            n_geo_merged = batch_size * n_per_frame
+            if n_geo_merged == n_vision_tokens:
+                return t
+            if n_vision_tokens % n_geo_merged != 0:
+                raise ValueError(
+                    f"Cannot tile geometry ({n_geo_merged} merged positions from "
+                    f"shape {tuple(t.shape)}) to {n_vision_tokens} vision tokens."
+                )
+            return t.repeat(n_vision_tokens // n_geo_merged, 1, 1)
+
+        if isinstance(geo_feats, (list, tuple)):
+            return [tile_tensor(g) for g in geo_feats]
+        return tile_tensor(geo_feats)
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1566,6 +1602,12 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                 vision_tokens = hidden_states[vision_token_mask]  # [N_total_img, lang_C]
 
                 geo_feats = geometry_layer_features[layer_idx]  # [B, N_vis*m^2, geo_C]
+                geo_feats = self._tile_geometry_features_for_vision_tokens(
+                    geo_feats,
+                    vision_tokens.shape[0],
+                    self.config.vision_config.spatial_merge_size,
+                    getattr(self.config, "include_camera_token", False),
+                )
 
                 # Apply fusion: vision_tokens are treated as [B*N_vis, lang_C],
                 # geo_feats carry the spatial geometry to inject.
