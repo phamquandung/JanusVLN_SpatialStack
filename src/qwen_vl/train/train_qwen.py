@@ -26,7 +26,8 @@ import sys
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent.parent
-sys.path.append(str(project_root))
+# Prefer repo source over any pip-installed JanusVLN copy in site-packages.
+sys.path.insert(0, str(project_root))
 
 import qwen_vl.train.trainer
 import qwen_vl.train.sampler

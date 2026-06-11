@@ -578,6 +578,43 @@ class MultiLayerFeatureFusionModule(nn.Module):
 
         return features_2d
 
+    @staticmethod
+    def _tile_geo_rows_to_vision_count(
+        geo_feats: torch.Tensor,
+        n_vision_tokens: int,
+    ) -> torch.Tensor:
+        """Repeat per-frame geometry rows to match total LM image-token count.
+
+        JanusVLN sequences can contain multiple image placeholders (history frames)
+        while VGGT geometry is collected for a single representative frame.  The legacy
+        lam_add path tiles 3D features the same way before additive fusion.
+        """
+        n_geo = geo_feats.shape[0]
+        if n_geo == n_vision_tokens:
+            return geo_feats
+        if n_vision_tokens % n_geo != 0:
+            raise ValueError(
+                f"Cannot tile {n_geo} geometry tokens to {n_vision_tokens} vision tokens. "
+                "Expected vision token count to be an integer multiple of per-frame geometry."
+            )
+        return geo_feats.repeat(n_vision_tokens // n_geo, 1)
+
+    @staticmethod
+    def _tile_geo_tokens_to_vision_count(
+        geo_feats: torch.Tensor,
+        n_vision_tokens: int,
+    ) -> torch.Tensor:
+        """Repeat per-frame geometry along the token dimension [B, N, C]."""
+        n_geo = geo_feats.shape[1]
+        if n_geo == n_vision_tokens:
+            return geo_feats
+        if n_vision_tokens % n_geo != 0:
+            raise ValueError(
+                f"Cannot tile {n_geo} geometry tokens to {n_vision_tokens} vision tokens. "
+                "Expected vision token count to be an integer multiple of per-frame geometry."
+            )
+        return geo_feats.repeat(1, n_vision_tokens // n_geo, 1)
+
     def _apply_block(
         self,
         block: nn.Module,
@@ -618,8 +655,9 @@ class MultiLayerFeatureFusionModule(nn.Module):
             geo_feats = block["geo_ln"](features_3d)        # [B, N_vis*m^2, geo_C]
             # Flatten m^2 tokens per position: [B*N_vis, geo_C * m^2]
             geo_feats = geo_feats.reshape(-1, self.geo_hidden_size * m * m)
-            geo_feats = block["geo_mlp"](geo_feats)         # [B*N_vis, lang_C]
-            # features_2d is [B*N_vis, lang_C] (LM image-token slice)
+            geo_feats = block["geo_mlp"](geo_feats)         # [B*N_vis_geo, lang_C]
+            # features_2d may include multiple image groups in the LM sequence.
+            geo_feats = self._tile_geo_rows_to_vision_count(geo_feats, features_2d.shape[0])
             return features_2d + geo_feats
 
         elif self.fusion_method == "deepstack_language_cross_attn":
@@ -629,37 +667,41 @@ class MultiLayerFeatureFusionModule(nn.Module):
             # N_tokens = N_vis*m^2  or  N_vis*m^2 + 1 (with camera token)
 
             B = geo_feats.shape[0]
-            n_img_tokens = features_2d.shape[0] // B   # N_vis per image
+            n_vision_tokens = features_2d.shape[0] // B
+            n_vis_geo = (geo_feats.shape[1] - 1) // (m * m) if (
+                geo_feats.shape[1] % (m * m) == 1
+            ) else geo_feats.shape[1] // (m * m)
+            has_camera_token = geo_feats.shape[1] == n_vis_geo * m * m + 1
 
-            if geo_feats.shape[1] == n_img_tokens * m * m:
-                # No camera token: process all as patch tokens
-                geo_feats = block["geo_ln"](geo_feats)   # [B, N_vis*m^2, geo_C]
+            if not has_camera_token:
+                geo_feats = block["geo_ln"](geo_feats)   # [B, N_vis_geo*m^2, geo_C]
                 geo_feats = geo_feats.reshape(-1, self.geo_hidden_size * m * m)
-                geo_feats = block["geo_mlp"](geo_feats)  # [B*N_vis, lang_C]
-                geo_feats = geo_feats.reshape(B, n_img_tokens, -1)
+                geo_feats = block["geo_mlp"](geo_feats)  # [B*N_vis_geo, lang_C]
+                geo_feats = geo_feats.reshape(B, n_vis_geo, -1)
+                geo_feats = self._tile_geo_tokens_to_vision_count(geo_feats, n_vision_tokens)
             else:
-                # First token is the camera token, rest are patch tokens
                 cam_token    = geo_feats[:, 0:1, :]          # [B, 1, geo_C]
-                patch_tokens = geo_feats[:, 1:, :]           # [B, N_vis*m^2, geo_C]
+                patch_tokens = geo_feats[:, 1:, :]           # [B, N_vis_geo*m^2, geo_C]
 
                 cam_projected = block["cam_proj"](cam_token) # [B, 1, lang_C]
 
-                patch_tokens = block["geo_ln"](patch_tokens) # [B, N_vis*m^2, geo_C]
+                patch_tokens = block["geo_ln"](patch_tokens) # [B, N_vis_geo*m^2, geo_C]
                 patch_tokens = patch_tokens.reshape(-1, self.geo_hidden_size * m * m)
-                patch_tokens = block["geo_mlp"](patch_tokens) # [B*N_vis, lang_C]
-                patch_tokens = patch_tokens.reshape(B, n_img_tokens, -1)
+                patch_tokens = block["geo_mlp"](patch_tokens) # [B*N_vis_geo, lang_C]
+                patch_tokens = patch_tokens.reshape(B, n_vis_geo, -1)
+                patch_tokens = self._tile_geo_tokens_to_vision_count(patch_tokens, n_vision_tokens)
 
                 geo_feats = torch.cat([cam_projected, patch_tokens], dim=1)  # [B, 1+N_vis, lang_C]
 
             # Cross-attention: LM image tokens attend over projected geo tokens
-            features_2d_2d = features_2d.reshape(B, n_img_tokens, -1)  # [B, N_vis, lang_C]
+            features_2d_2d = features_2d.reshape(B, n_vision_tokens, -1)  # [B, N_vis, lang_C]
             features_2d_2d = block["cross_attn"](
                 features_2d_2d,   # query  [B, N_vis, lang_C]
                 geo_feats,        # k/v    [B, N_vis(+1), lang_C]
                 vis_pos_embed,
                 geo_pos_embed,
             )  # [B, N_vis, lang_C]
-            return features_2d_2d.reshape(B * n_img_tokens, -1)  # [B*N_vis, lang_C]
+            return features_2d_2d.reshape(B * n_vision_tokens, -1)  # [B*N_vis, lang_C]
 
         else:
             raise ValueError(f"Unknown fusion_method: {self.fusion_method}")

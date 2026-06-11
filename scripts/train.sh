@@ -57,6 +57,7 @@ POS_ENCODING_TYPE="${POS_ENCODING_TYPE:-none}"
 INCLUDE_CAMERA_TOKEN="${INCLUDE_CAMERA_TOKEN:-False}"
 TUNE_MM_FUSION="${TUNE_MM_FUSION:-True}"
 
+export PYTHONPATH="$(cd "$(dirname "$0")/.." && pwd)/src:${PYTHONPATH:-}"
 export NCCL_NVLS_ENABLE=0
 
 train_args=(
