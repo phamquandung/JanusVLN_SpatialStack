@@ -23,9 +23,9 @@ export WORLD_SIZE NODE_RANK
 # ======================
 # Path Configuration
 # ======================
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}"
-VGGT_MODEL_PATH="${VGGT_MODEL_PATH:-facebook/VGGT-1B}"
-OUTPUT_DIR="${OUTPUT_DIR:-./JanusVLN_Base}"
+MODEL_PATH="${MODEL_PATH:-/mnt/data/vmo-ai-task/dungpq6/model-checkpoint/Qwen2.5-VL-3B-Instruct}"
+VGGT_MODEL_PATH="${VGGT_MODEL_PATH:-/mnt/data/vmo-ai-task/dungpq6/model-checkpoint/VGGT-1B}"
+OUTPUT_DIR="${OUTPUT_DIR:-/mnt/data/vmo-ai-task/dungpq6/model-checkpoint/JanusVLN-3B-spatial-stack}"
 CACHE_DIR="${CACHE_DIR:-./cache}"
 mkdir -p "$OUTPUT_DIR"
 
